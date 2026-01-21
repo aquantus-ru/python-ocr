@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import pytesseract
 from PIL import Image
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 import cv2
 
 def is_tesseract_installed():
@@ -45,12 +45,37 @@ def process_image(file_path, args):
     return ocr_image(image, args.lang)
 
 def process_pdf(file_path, args):
-    """Process a PDF file."""
-    images = convert_from_path(file_path)
+    """Process a PDF file by splitting into pages to handle large files."""
+    try:
+        # Get PDF info to determine page count
+        info = pdfinfo_from_path(file_path)
+        max_pages = info["Pages"]
+    except Exception as e:
+        print(f"Warning: Could not get PDF info: {e}. Trying to load all pages at once.")
+        # Fallback to original behavior
+        images = convert_from_path(file_path)
+        text = ""
+        for image_obj in images:
+            processed_image = preprocess_image(image_obj, args.grayscale, args.threshold, args.resize)
+            text += ocr_image(processed_image, args.lang) + "\n\n"
+        return text
+
     text = ""
-    for image_obj in images:
-        processed_image = preprocess_image(image_obj, args.grayscale, args.threshold, args.resize)
-        text += ocr_image(processed_image, args.lang) + "\n\n"
+    # Iterate through pages 1 to max_pages
+    for page in range(1, max_pages + 1):
+        try:
+            # Convert single page
+            images = convert_from_path(file_path, first_page=page, last_page=page)
+            if images:
+                image_obj = images[0]
+                processed_image = preprocess_image(image_obj, args.grayscale, args.threshold, args.resize)
+                text += ocr_image(processed_image, args.lang) + "\n\n"
+                # Help garbage collector
+                image_obj.close()
+        except Exception as e:
+            print(f"Error processing page {page}: {e}")
+            text += f"[Error processing page {page}]\n\n"
+
     return text
 
 def process_video(file_path, args):
