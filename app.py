@@ -2,7 +2,8 @@ import os
 import sys
 import uuid
 import subprocess
-from flask import Flask, render_template, request, redirect, url_for, flash
+import json
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -37,11 +38,10 @@ def process():
     if file and allowed_file(file.filename):
         job_id = str(uuid.uuid4())
         filename = secure_filename(file.filename)
-        # Use job_id in filename to avoid collisions and track easily
-        # But we must keep extension for ocr_scanner to detect type
         extension = filename.rsplit('.', 1)[1].lower()
         save_filename = f"{job_id}.{extension}"
         filepath = os.path.join(UPLOAD_FOLDER, save_filename)
+        progress_filepath = os.path.join(RESULTS_FOLDER, f"{job_id}.progress")
 
         file.save(filepath)
 
@@ -54,7 +54,8 @@ def process():
                 '-i', filepath,
                 '-o', RESULTS_FOLDER,
                 '-l', lang,
-                '--overwrite'
+                '--overwrite',
+                '--progress-file', progress_filepath
             ]
 
             if 'grayscale' in request.form:
@@ -78,36 +79,64 @@ def process():
 
 @app.route('/status/<job_id>')
 def status(job_id):
+    # Check if client wants JSON
+    wants_json = request.args.get('format') == 'json' or request.accept_mimetypes.best == 'application/json'
+
     if job_id not in JOBS:
-        # Fallback: check if result file exists (in case of server restart)
-        # But we can't know if it failed or is still running without the process handle in this simple implementation.
-        # We will check only for success.
+        # Check if result file exists (finished job that was cleared from memory or server restarted)
         result_filename = f"{job_id}.txt"
         result_path = os.path.join(RESULTS_FOLDER, result_filename)
+
         if os.path.exists(result_path):
-             with open(result_path, 'r') as f:
+            if wants_json:
+                 return jsonify({'status': 'finished', 'progress': 100})
+
+            with open(result_path, 'r') as f:
                 text = f.read()
-             # Cleanup result file (optional, maybe we want to keep it?)
-             # Let's clean it up to save space
-             os.remove(result_path)
-             # Also try to clean upload if it lingers
-             upload_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
-             if os.path.exists(upload_path):
-                 os.remove(upload_path)
 
-             return render_template('result.html', text=text)
+            # Cleanup
+            os.remove(result_path)
+            upload_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+            if os.path.exists(upload_path):
+                os.remove(upload_path)
+            progress_path = os.path.join(RESULTS_FOLDER, f"{job_id}.progress")
+            if os.path.exists(progress_path):
+                os.remove(progress_path)
 
+            return render_template('result.html', text=text)
+
+        if wants_json:
+             return jsonify({'status': 'not_found'}), 404
         return "Job not found or expired", 404
 
     proc = JOBS[job_id]
     ret_code = proc.poll()
 
+    # Read progress file
+    progress_data = {"current": 0, "total": 100} # Default
+    progress_path = os.path.join(RESULTS_FOLDER, f"{job_id}.progress")
+    if os.path.exists(progress_path):
+        try:
+            with open(progress_path, 'r') as f:
+                progress_data = json.load(f)
+        except:
+            pass # Ignore read errors (e.g. file lock or partial write)
+
     if ret_code is None:
         # Still running
+        if wants_json:
+            return jsonify({
+                'status': 'processing',
+                'current': progress_data.get('current', 0),
+                'total': progress_data.get('total', 100) # Default to 100 if unknown, or handle UI logic
+            })
         return render_template('processing.html', job_id=job_id)
 
     elif ret_code == 0:
         # Finished successfully
+        if wants_json:
+             return jsonify({'status': 'finished', 'current': progress_data.get('total', 100), 'total': progress_data.get('total', 100)})
+
         result_filename = f"{job_id}.txt"
         result_path = os.path.join(RESULTS_FOLDER, result_filename)
 
@@ -123,6 +152,8 @@ def status(job_id):
         upload_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
         if os.path.exists(upload_path):
             os.remove(upload_path)
+        if os.path.exists(progress_path):
+            os.remove(progress_path)
 
         del JOBS[job_id]
 
@@ -131,6 +162,9 @@ def status(job_id):
     else:
         # Failed
         del JOBS[job_id]
+        if wants_json:
+             return jsonify({'status': 'failed'})
+
         flash("Processing failed.")
         return redirect(url_for('index'))
 
