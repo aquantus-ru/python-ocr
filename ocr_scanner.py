@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import pytesseract
+import json
 from PIL import Image
 from pdf2image import convert_from_path, pdfinfo_from_path
 import cv2
@@ -44,6 +45,15 @@ def process_image(file_path, args):
     image = preprocess_image(file_path, args.grayscale, args.threshold, args.resize)
     return ocr_image(image, args.lang)
 
+def update_progress(args, current, total):
+    """Update progress file if specified."""
+    if args.progress_file:
+        try:
+            with open(args.progress_file, 'w') as f:
+                json.dump({"current": current, "total": total}, f)
+        except Exception as e:
+            print(f"Warning: Could not update progress file: {e}")
+
 def process_pdf(file_path, args):
     """Process a PDF file by splitting into pages to handle large files."""
     try:
@@ -55,7 +65,9 @@ def process_pdf(file_path, args):
         # Fallback to original behavior
         images = convert_from_path(file_path)
         text = ""
-        for image_obj in images:
+        total = len(images)
+        for i, image_obj in enumerate(images):
+            update_progress(args, i + 1, total)
             processed_image = preprocess_image(image_obj, args.grayscale, args.threshold, args.resize)
             text += ocr_image(processed_image, args.lang) + "\n\n"
         return text
@@ -63,6 +75,7 @@ def process_pdf(file_path, args):
     text = ""
     # Iterate through pages 1 to max_pages
     for page in range(1, max_pages + 1):
+        update_progress(args, page, max_pages)
         try:
             # Convert single page
             images = convert_from_path(file_path, first_page=page, last_page=page)
@@ -140,6 +153,9 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="Directory where the text files will be saved")
     parser.add_argument("-ow", "--overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("-l", "--lang", default="eng", help="Language for Tesseract OCR")
+
+    # Progress tracking
+    parser.add_argument("--progress-file", help="File to write progress to (JSON format)")
 
     # Video-specific options
     parser.add_argument("--interval", type=int, default=1, help="Time in seconds between each screenshot from a video")
